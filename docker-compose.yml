@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # Base de données MongoDB
+  mongodb:
+    image: mongo:6.0
+    container_name: movies_mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: movie_recommender
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - movies_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend Flask
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: movies_backend
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_APP: app.py
+      FLASK_ENV: development
+      MONGO_URI: mongodb://admin:password@mongodb:27017/movie_recommender?authSource=admin
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-key-change-in-production}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-secret-token}
+      FLASK_DEBUG: 1
+    volumes:
+      - ./Backend:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - movies_network
+    command: python run.py
+
+  # Frontend React (optionnel)
+  frontend:
+    image: node:18-alpine
+    container_name: movies_frontend
+    ports:
+      - "3000:3000"
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      REACT_APP_API_URL: http://localhost:5000
+    networks:
+      - movies_network
+    command: npm start
+
+volumes:
+  mongodb_data:
+
+networks:
+  movies_network:
+    driver: bridge
