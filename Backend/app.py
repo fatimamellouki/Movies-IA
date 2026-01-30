@@ -142,6 +142,40 @@ def login():
         print(f"Erreur de connexion: {e}")
         return jsonify({'message': str(e)}), 500
 
+
+
+@app.route('/api/user/preferences', methods=['POST'])
+@jwt_required()
+def set_user_preferences():
+    """Mettre à jour les genres préférés de l'utilisateur (après inscription)"""
+    try:
+        user = get_user_from_token()
+        if not user:
+            return jsonify({'message': 'Utilisateur non trouvé'}), 404
+
+        data = request.get_json()
+        genre_weights = data.get('genre_weights', {})
+
+        # Stocker les poids de genres
+        db.users.update_one(
+            {'_id': user['_id']},
+            {'$set': {'preferences.genre_weights': genre_weights}}
+        )
+
+        # Recalculer les recommandations
+        recommendations = recommender.recommend_for_existing_user(user['_id'], top_n=20)
+
+        return jsonify({
+            'message': 'Préférences enregistrées',
+            'recommendations': recommendations
+        }), 200
+
+    except Exception as e:
+        print(f"Erreur: {e}")
+        traceback.print_exc()
+        return jsonify({'message': str(e)}), 500
+
+
 # Routes publiques (pas besoin d'authentification)
 @app.route('/api/health', methods=['GET'])
 def health_check():

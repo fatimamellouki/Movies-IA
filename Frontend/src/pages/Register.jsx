@@ -40,7 +40,7 @@ export default function Register(){
       })
       const token = loginRes.data.access_token
       login(token)
-      navigate('/dashboard')
+      navigate('/select-genres')
     }catch(err){
       setError(err?.response?.data?.message || 'Erreur lors de l\'inscription')
     }

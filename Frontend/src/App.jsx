@@ -3,6 +3,7 @@ import { Routes, Route, Link, useNavigate } from 'react-router-dom'
 import Home from './pages/Home'
 import Login from './pages/Login'
 import Register from './pages/Register'
+import SelectGenres from './pages/SelectGenres';
 import Movies from './pages/Movies'
 import MovieDetail from './pages/MovieDetail'
 import Dashboard from './pages/Dashboard'
@@ -84,6 +85,7 @@ function AppRoutes(){
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/select-genres" element={<SelectGenres />} />
           <Route path="/search" element={<Search />} />
           <Route path="/movies" element={<Movies />} />
           <Route path="/movies/:id" element={<MovieDetail />} />

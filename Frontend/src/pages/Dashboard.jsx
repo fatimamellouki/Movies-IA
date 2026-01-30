@@ -14,7 +14,7 @@ export default function Dashboard(){
   useEffect(()=>{
     // Recommandations personnalisées
     client.get('/recommendations/first-time')
-      .then(r=> setRecommendations(r.data || []))
+      .then(r=> setRecommendations(r.data?.recommendations || []))
       .catch(()=> setRecommendations([]))
       .finally(()=> setLoadingRecs(false))
 
@@ -46,7 +46,7 @@ export default function Dashboard(){
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
             {loadingRecs && [...Array(4)].map((_, i)=> <MovieSkeleton key={i} />)}
-            {!loadingRecs && recommendations.length > 0 && recommendations.map(m=> <MovieCardWithVideo key={m.movie_id} m={m} />)}
+            {!loadingRecs && recommendations.length > 0 && recommendations.slice(0, 8).map(m=> <MovieCardWithVideo key={m.movie_id} m={m} />)}
             {!loadingRecs && recommendations.length === 0 && (
               <div className="col-span-full text-center py-12 text-gray-400">
                 <p className="mb-4">Aucune recommandation disponible</p>

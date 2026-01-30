@@ -35,15 +35,12 @@ class Installer:
         """Afficher une information"""
         print(f"ℹ️  {text}")
 
-    def run_command(self, command, cwd=None, shell=True):
+    def run_command(self, command, cwd=None):
         """Exécuter une commande"""
         try:
             result = subprocess.run(
                 command,
                 cwd=cwd,
-                shell=shell,
-                capture_output=False,
-                text=True
             )
             return result.returncode == 0
         except Exception as e:
@@ -61,8 +58,8 @@ class Installer:
             return True
         
         self.print_info("Création de l'environnement virtuel...")
-        result = self.run_command(f"{sys.executable} -m venv venv")
-        
+        result = self.run_command("py -3.11 -m venv venv")
+
         if result:
             self.print_success("Environnement virtuel créé")
         else:

@@ -6,6 +6,9 @@ from scipy.sparse import csr_matrix, save_npz, load_npz
 import os
 from datetime import datetime
 
+# csr_matrix : pour représenter les matrices creuses (sparse), utile pour économiser de la mémoire.
+# save_npz/load_npz : pour sauvegarder/recharger les matrices déjà calculées.
+
 class SimilarityCalculator:
     def __init__(self, db):
         self.db = db
