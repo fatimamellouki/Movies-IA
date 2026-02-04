@@ -38,9 +38,9 @@ def run_offline_computations(db):
         print("👥 Calcul des similarités user-user...")
         recommender.calculate_user_similarities()
         
-        # 5. Similarités content-based
-        print("🎭 Calcul des similarités content-based...")
-        recommender.calculate_content_based_similarity()
+        # # 5. Similarités content-based
+        # print("🎭 Calcul des similarités content-based...")
+        # recommender.calculate_content_based_similarity()
         
         end_time = time.time()
         duration = end_time - start_time

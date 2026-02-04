@@ -7,6 +7,8 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 import bcrypt
 import os
+import threading
+import time
 from dotenv import load_dotenv
 from offline.recommender import HybridRecommender
 import traceback
@@ -22,6 +24,7 @@ app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'votre-cle-secrete-tr
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 jwt = JWTManager(app)
 
+
 # Connexion MongoDB
 MONGO_URI = os.getenv('MONGO_URI', 'mongodb://localhost:27017/movie_recommender')
 client = MongoClient(MONGO_URI)
@@ -30,14 +33,22 @@ db = client.movie_recommender
 # Initialiser le recommandeur
 recommender = HybridRecommender(db)
 
+# Collection cache recommandations
+recommendation_cache_col = db.recommendation_cache
+
+# Initialiser le recommandeur
+recommender = HybridRecommender(db)
+
+# Collection MongoDB pour stocker les recommandations par utilisateur
+recommendation_cache_col = db.recommendation_cache
+
+# ----------------------- Helpers -----------------------
 def get_user_from_token():
     """Récupérer l'utilisateur à partir du token JWT"""
     try:
         current_user_id = get_jwt_identity()
         if not current_user_id:
             return None
-        
-        # Convertir en ObjectId
         return db.users.find_one({'_id': ObjectId(current_user_id)})
     except Exception as e:
         print(f"Erreur lors de la récupération de l'utilisateur: {e}")
@@ -49,6 +60,54 @@ def generate_user_id():
     if last_user and 'user_id' in last_user:
         return last_user['user_id'] + 1
     return 1
+
+def get_cached_recommendations(user_id, user_object_id):
+    """Retourne le cache si disponible, sinon génère cold-start"""
+    cache_doc = recommendation_cache_col.find_one({'user_id': user_id})
+    if cache_doc:
+        return cache_doc['items'], cache_doc.get('user_type', 'existing')
+    
+    # Cold-start
+    recommendations = recommender.recommend_for_new_user(user_object_id, top_n=30)
+    recommendation_cache_col.update_one(
+        {'user_id': user_id},
+        {'$set': {'items': recommendations, 'user_type': 'new', 'updated_at': datetime.now(), 'ratings_count': 0, 'recomputing': False}},
+        upsert=True
+    )
+    return recommendations, 'new'
+
+def recalc_recommendations_if_needed(user):
+    """Recalcule les recommandations en arrière-plan si nécessaire"""
+    user_id = user['user_id']
+    user_object_id = user['_id']
+    ratings_count = db.ratings.count_documents({'user_id': user_id})
+    
+    cache_doc = recommendation_cache_col.find_one({'user_id': user_id})
+    last_count = cache_doc.get('ratings_count', 0) if cache_doc else 0
+    recomputing = cache_doc.get('recomputing', False) if cache_doc else False
+    
+    if (ratings_count - last_count) >= 3 and not recomputing:
+        def background():
+            try:
+                recommendation_cache_col.update_one({'user_id': user_id}, {'$set': {'recomputing': True}}, upsert=True)
+                if ratings_count == 0:
+                    recs = recommender.recommend_for_new_user(user_object_id, top_n=30)
+                    utype = 'new'
+                else:
+                    recs = recommender.recommend_for_existing_user(user_object_id, top_n=30)
+                    utype = 'existing'
+                recommendation_cache_col.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'items': recs, 'user_type': utype, 'updated_at': datetime.now(), 'ratings_count': ratings_count, 'recomputing': False}},
+                    upsert=True
+                )
+                print(f"✅ Recompute terminé pour user {user_id}")
+            except Exception as e:
+                print(f"⚠️ Erreur recompute user {user_id}: {e}")
+                traceback.print_exc()
+                recommendation_cache_col.update_one({'user_id': user_id}, {'$set': {'recomputing': False}})
+        threading.Thread(target=background, daemon=True).start()
+    
 
 # Routes d'authentification
 @app.route('/api/register', methods=['POST'])
@@ -142,8 +201,6 @@ def login():
         print(f"Erreur de connexion: {e}")
         return jsonify({'message': str(e)}), 500
 
-
-
 @app.route('/api/user/preferences', methods=['POST'])
 @jwt_required()
 def set_user_preferences():
@@ -161,13 +218,8 @@ def set_user_preferences():
             {'_id': user['_id']},
             {'$set': {'preferences.genre_weights': genre_weights}}
         )
-
-        # Recalculer les recommandations
-        recommendations = recommender.recommend_for_existing_user(user['_id'], top_n=20)
-
         return jsonify({
             'message': 'Préférences enregistrées',
-            'recommendations': recommendations
         }), 200
 
     except Exception as e:
@@ -194,6 +246,7 @@ def get_popular_movies():
     except Exception as e:
         print(f"Erreur: {e}")
         return jsonify({'message': str(e)}), 500
+
 
 # Routes protégées
 @app.route('/api/movies', methods=['GET'])
@@ -233,78 +286,69 @@ def search_movies():
         return jsonify({'message': str(e)}), 500
 
 # Routes de recommandation
-@app.route('/api/recommendations/first-time', methods=['GET'])
+# ----------------------- Recommandations -----------------------
+@app.route('/api/recommendations', methods=['GET'])
 @jwt_required()
-def get_first_time_recommendations():
-    """Recommandations pour la première connexion"""
+def get_recommendations():
     try:
+        start = time.time()
         user = get_user_from_token()
         if not user:
             return jsonify({'message': 'Utilisateur non trouvé'}), 404
-        
-        print(f"Génération de recommandations pour utilisateur: {user.get('user_id')}")
-        
-        # Vérifier si l'utilisateur a des évaluations
-        user_ratings = list(db.ratings.find({'user_id': user.get('user_id')}))
-        
-        if not user_ratings:
-            # Nouvel utilisateur - utiliser la méthode new-user
-            recommendations = recommender.recommend_for_new_user(user['_id'], top_n=30)
-        else:
-            # Utilisateur existant - utiliser la méthode personnalisée
-            recommendations = recommender.recommend_for_existing_user(user['_id'], top_n=30)
-        
-        print(f"Nombre de recommandations générées: {len(recommendations)}")
-        
-        return jsonify({
-            'recommendations': recommendations,
-            'user_type': 'new' if not user_ratings else 'existing',
-            'ratings_count': len(user_ratings)
-        }), 200
-    
-    except Exception as e:
-        print(f"Erreur lors de la génération des recommandations: {e}")
-        traceback.print_exc()
-        
-        # Fallback: retourner des films populaires
-        movies = list(db.movies.find(
-            {},
-            {'_id': 0, 'movie_id': 1, 'title': 1, 'genres': 1, 'year': 1, 'bayesian_rating': 1}
-        ).sort('bayesian_rating', -1).limit(20))
-        
-        return jsonify({
-            'recommendations': [{
-                'movie_id': m['movie_id'],
-                'title': m['title'],
-                'genres': m.get('genres', []),
-                'year': m.get('year'),
-                'score': m.get('bayesian_rating', 3.0),
-                'explanation': 'Film populaire (fallback)'
-            } for m in movies],
-            'user_type': 'fallback',
-            'ratings_count': 0
-        }), 200
 
-@app.route('/api/recommendations/personalized', methods=['GET'])
-@jwt_required()
-def get_personalized_recommendations():
-    try:
-        user = get_user_from_token()
-        if not user:
-            return jsonify({'message': 'Utilisateur non trouvé'}), 404
-        
-        # Obtenir les recommandations personnalisées
-        recommendations = recommender.recommend_for_existing_user(user['_id'], top_n=20)
-        
-        return jsonify({
-            'recommendations': recommendations,
-            'user_id': user.get('user_id')
-        }), 200
-    
+        user_id = user['user_id']
+        user_object_id = user['_id']
+        ratings_count = db.ratings.count_documents({'user_id': user_id})
+
+        # Retourne le cache si disponible
+        cache_doc = recommendation_cache_col.find_one({'user_id': user_id})
+        if cache_doc and cache_doc.get('items'):
+            # Trigger recompute si nécessaire
+            recalc_recommendations_if_needed(user)
+            resp = {
+                'recommendations': cache_doc['items'],
+                'user_type': cache_doc.get('user_type', 'existing'),
+                'ratings_count': ratings_count,
+                'updated_at': cache_doc.get('updated_at').isoformat() if cache_doc.get('updated_at') else None,
+                'recomputing': cache_doc.get('recomputing', False)
+            }
+            duration = time.time() - start
+            print(f"/api/recommendations - returned cached for user {user_id} in {duration:.2f}s")
+            return jsonify(resp), 200
+
+        # Pas de cache: calcul en background + fallback
+        def compute_and_store():
+            try:
+                recommendation_cache_col.update_one({'user_id': user_id}, {'$set': {'recomputing': True}}, upsert=True)
+                if ratings_count == 0:
+                    recs = recommender.recommend_for_new_user(user_object_id, top_n=30)
+                    utype = 'new'
+                else:
+                    recs = recommender.recommend_for_existing_user(user_object_id, top_n=30)
+                    utype = 'existing'
+                recommendation_cache_col.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'items': recs, 'user_type': utype, 'updated_at': datetime.now(), 'ratings_count': ratings_count, 'recomputing': False}},
+                    upsert=True
+                )
+            except Exception as e:
+                print(f"Error computing recommendations: {e}")
+                traceback.print_exc()
+                recommendation_cache_col.update_one({'user_id': user_id}, {'$set': {'recomputing': False}})
+        threading.Thread(target=compute_and_store, daemon=True).start()
+
+        # Fallback rapide aux films populaires
+        movies = list(db.movies.find({}, {'_id':0, 'movie_id':1, 'title':1, 'genres':1, 'year':1, 'bayesian_rating':1}).sort('bayesian_rating', -1).limit(20))
+        fallback = [{'movie_id': m['movie_id'], 'title': m['title'], 'genres': m.get('genres', []), 'year': m.get('year'), 'score': m.get('bayesian_rating',3.0), 'explanation':'Film populaire (fallback)'} for m in movies]
+        duration = time.time() - start
+        print(f"/api/recommendations - returned fallback for user {user_id} in {duration:.2f}s")
+        return jsonify({'recommendations': fallback, 'user_type':'fallback', 'ratings_count': ratings_count, 'updated_at': None, 'recomputing': True}), 200
+
     except Exception as e:
-        print(f"Erreur: {e}")
+        print(f"Erreur recommandations: {e}")
         traceback.print_exc()
         return jsonify({'message': str(e)}), 500
+
 
 @app.route('/api/rate', methods=['POST'])
 @jwt_required()
@@ -312,61 +356,35 @@ def rate_movie():
     try:
         user = get_user_from_token()
         if not user:
-            return jsonify({'message': 'Utilisateur non trouvé'}), 404
-        
+            return jsonify({'message':'Utilisateur non trouvé'}), 404
+
         data = request.get_json()
         movie_id = int(data['movie_id'])
         rating = float(data['rating'])
-        
-        # Vérifier la validité de la note
-        if rating < 1 or rating > 5:
-            return jsonify({'message': 'La note doit être entre 1 et 5'}), 400
-        
-        # Créer ou mettre à jour l'évaluation
-        rating_record = {
-            'user_id': user['user_id'],
-            'movie_id': movie_id,
-            'rating': rating,
-            'timestamp': datetime.now()
-        }
-        
-        # Utiliser upsert pour éviter les doublons
-        db.ratings.update_one(
-            {'user_id': user['user_id'], 'movie_id': movie_id},
-            {'$set': rating_record},
-            upsert=True
-        )
-        
-        # Mettre à jour les statistiques du film
+        if rating <1 or rating>5:
+            return jsonify({'message':'La note doit être entre 1 et 5'}), 400
+
+        rating_record = {'user_id': user['user_id'], 'movie_id': movie_id, 'rating': rating, 'timestamp': datetime.now()}
+        db.ratings.update_one({'user_id': user['user_id'], 'movie_id': movie_id}, {'$set': rating_record}, upsert=True)
+
+        # Mise à jour stats du film
         movie_ratings = list(db.ratings.find({'movie_id': movie_id}))
         if movie_ratings:
-            avg_rating = sum(r['rating'] for r in movie_ratings) / len(movie_ratings)
-            db.movies.update_one(
-                {'movie_id': movie_id},
-                {
-                    '$set': {
-                        'average_rating': avg_rating,
-                        'ratings_count': len(movie_ratings),
-                        'bayesian_rating': (len(movie_ratings) * avg_rating + 10 * 3.0) / (len(movie_ratings) + 10)
-                    }
-                }
-            )
-        
-        # Mettre à jour les préférences de l'utilisateur
+            avg_rating = sum(r['rating'] for r in movie_ratings)/len(movie_ratings)
+            db.movies.update_one({'movie_id': movie_id}, {'$set': {'average_rating': avg_rating, 'ratings_count': len(movie_ratings), 'bayesian_rating': (len(movie_ratings)*avg_rating+10*3.0)/(len(movie_ratings)+10)}})
+
+        # Update preferences et trigger recompute cache
         try:
             recommender.update_user_preferences(user['_id'])
+            recalc_recommendations_if_needed(user)
         except Exception as e:
-            print(f"Warning: Erreur lors de la mise à jour des préférences: {e}")
-        
-        return jsonify({
-            'message': 'Évaluation enregistrée',
-            'movie_id': movie_id,
-            'rating': rating
-        }), 200
-    
+            print(f"Warning update preferences: {e}")
+
+        return jsonify({'message':'Évaluation enregistrée','movie_id':movie_id,'rating':rating}), 200
+
     except Exception as e:
-        print(f"Erreur: {e}")
-        return jsonify({'message': str(e)}), 500
+        print(f"Erreur rating: {e}")
+        return jsonify({'message':str(e)}), 500
 
 @app.route('/api/user/stats', methods=['GET'])
 @jwt_required()

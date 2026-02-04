@@ -26,13 +26,13 @@ class HybridRecommender:
             
             # 2. Calcul de la popularité bayésienne par cluster
             print("🏆 Étape 2/4: Calcul de la popularité bayésienne...")
-            self.calculate_cluster_popularity()   
+            self.calculate_cluster_popularity()
             
-            # 3. Calcul des similarités item-item (Films similaires entre eux)
+            # 3. Calcul des similarités item-item
             print("🔗 Étape 3/4: Calcul des similarités item-item...")
-            self.calculate_item_similarities()      
+            self.calculate_item_similarities()
             
-            # 4. Calcul des similarités user-user (Utilisateurs similaires entre eux)
+            # 4. Calcul des similarités user-user
             print("👥 Étape 4/4: Calcul des similarités user-user...")
             self.calculate_user_similarities()
             
@@ -50,24 +50,24 @@ class HybridRecommender:
             '_id': 1, 'user_id': 1, 'age': 1, 'gender': 1, 'occupation': 1
         }))
         
-        if not users or len(users) < self.n_clusters:  
+        if not users or len(users) < self.n_clusters:
             print("⚠️ Pas assez d'utilisateurs pour le clustering")
             return
         
         print(f"📊 Clustering de {len(users)} utilisateurs...")
         
         # Préparer les données pour le clustering
-        user_data = []    # Liste des vecteurs de features
-        user_ids = []     # Stocke les IDs
+        user_data = []
+        user_ids = []
         
         for user in users:
             try:
-                # Récupère ou utilise des valeurs par défaut
+                # Valeurs par défaut
                 age = user.get('age', 25)
                 gender = user.get('gender', 'M')
                 occupation = user.get('occupation', 'other')
                 
-                # NORMALISATION : divise l'âge par 100 (pour le ramener entre 0-1)
+                # Normaliser l'âge
                 age_norm = age / 100.0
                 
                 # Encoder le genre
@@ -88,7 +88,7 @@ class HybridRecommender:
                     # Si l'occupation n'est pas dans la liste, utiliser 'other'
                     occupation_enc[occupations_list.index('other')] = 1
                 
-                # Combiner les features (âge normalisé + genre + 20 dimensions métier)
+                # Combiner les features
                 features = [age_norm, gender_enc] + occupation_enc
                 user_data.append(features)
                 user_ids.append(str(user['_id']))
@@ -109,11 +109,10 @@ class HybridRecommender:
             kmeans = KMeans(
                 n_clusters=self.n_clusters, 
                 random_state=42, 
-                n_init=10,       # 10 initialisations
-                max_iter=300     # Max 300 itérations
+                n_init=10,
+                max_iter=300
             )
-            # Assigne chaque user à un cluster
-            clusters = kmeans.fit_predict(user_data_array) 
+            clusters = kmeans.fit_predict(user_data_array)
             
             # Sauvegarder le modèle
             self.user_cluster_model = kmeans
@@ -160,7 +159,6 @@ class HybridRecommender:
                     print(f"  Cluster {cluster_id}: Aucun utilisateur")
                     continue
                 
-                # Extrait les user_ids
                 user_ids = [u['user_id'] for u in users_in_cluster]
                 
                 # Récupérer les évaluations de ces utilisateurs
@@ -182,11 +180,11 @@ class HybridRecommender:
                 movie_stats = df_ratings.groupby('movie_id').agg({
                     'rating': ['mean', 'count']
                 }).reset_index()
+                # calcule la moyenne et la moyenne de col rating pour chaque movie independament 
                 
                 movie_stats.columns = ['movie_id', 'avg_rating', 'rating_count']
                 
-                # Calcul bayésien (Cela évite de surpénaliser les films peu votés)
-                # Score = (votes * moyenne + votes_min * note_par_défaut) / (votes + votes_min)
+                # Calcul bayésien
                 C = 3.0  # Note moyenne attendue
                 m = 5    # Nombre minimum de votes pour ce cluster
                 
@@ -226,7 +224,7 @@ class HybridRecommender:
         """Calculer les similarités item-item"""
         print("🔗 Calcul des similarités item-item...")
         
-        # Récupérer tous les films avec leurs genres
+        # Récupérer tous les films
         movies = list(self.db.movies.find({}, {
             'movie_id': 1, 'genres': 1
         }))
@@ -288,8 +286,8 @@ class HybridRecommender:
                     # Garder les 20 plus similaires
                     # Trie par score décroissant et prend les 20 premiers
                     top_similar = dict(sorted(similar_items.items(), 
-                                             key=lambda x: x[1], 
-                                             reverse=True)[:20])
+                                                key=lambda x: x[1], 
+                                                reverse=True)[:20])
                     
                     # Mettre à jour dans MongoDB
                     result = self.db.movies.update_one(
@@ -319,7 +317,7 @@ class HybridRecommender:
         """Calculer les similarités user-user"""
         print("👥 Calcul des similarités user-user...")
         
-        # Récupérer toutes les évaluations (user_id, movie_id, rating)
+        # Récupérer toutes les évaluations
         ratings = list(self.db.ratings.find({}, {
             'user_id': 1, 'movie_id': 1, 'rating': 1
         }))
@@ -340,13 +338,16 @@ class HybridRecommender:
                 index='user_id', 
                 columns='movie_id', 
                 values='rating',
-                fill_value=0     # Films non évalués = 0
             )
-            
-            print(f"📐 Matrice: {user_movie_matrix.shape}")
+            user_movie_matrix_centered = user_movie_matrix.sub(
+            user_movie_matrix.mean(axis=1),  # moyenne par ligne (par utilisateur)
+            axis=0                           # soustraire par ligne
+            )
+            user_movie_matrix_centered = user_movie_matrix_centered.fillna(0)
+            print(f"📐 Matrice: {user_movie_matrix_centered.shape}")
             
             # Calculer la similarité cosinus
-            user_matrix = user_movie_matrix.values
+            user_matrix = user_movie_matrix_centered.values
             similarities = cosine_similarity(user_matrix)
             
             # Sauvegarder les similarités
@@ -362,8 +363,8 @@ class HybridRecommender:
                     
                     # Garder les 30 plus similaires
                     top_similar = dict(sorted(similar_users.items(), 
-                                             key=lambda x: x[1], 
-                                             reverse=True)[:30])
+                                                key=lambda x: x[1], 
+                                                reverse=True)[:30])
                     
                     # Mettre à jour dans MongoDB
                     result = self.db.users.update_one(
@@ -406,8 +407,7 @@ class HybridRecommender:
                 )
                 return
             
-            # SINON: préparer les features du nouvel user
-            # (même processus que dans cluster_users())
+            # Préparer les caractéristiques
             age = user.get('age', 25)
             gender = user.get('gender', 'M')
             occupation = user.get('occupation', 'other')
@@ -463,7 +463,7 @@ class HybridRecommender:
             
             cluster_id = user.get('cluster_id')
             if cluster_id is None:
-                # Si pas de cluster, retourne les films populaires globaux
+                # Si pas de cluster, retourner les films populaires
                 movies = list(self.db.movies.find(
                     {},
                     {'_id': 0, 'movie_id': 1, 'title': 1, 'genres': 1, 'year': 1, 'bayesian_rating': 1}
@@ -478,7 +478,7 @@ class HybridRecommender:
                     'explanation': 'Film populaire (aucun cluster assigné)'
                 } for m in movies]
             
-            # Récupère tous les films avec données de popularité par cluster
+            # Récupérer les films avec popularité dans le cluster
             cluster_movies = list(self.db.movies.find({
                 'cluster_popularity': {'$exists': True}
             }, {
@@ -501,10 +501,12 @@ class HybridRecommender:
                 
                 # Calculer similarité content-based
                 content_score = self._calculate_content_similarity(user, movie)
-                
-                # Score final (70% popularité cluster + 30% contenu)
-                final_score = 0.7 * cluster_score + 0.3 * content_score
-                
+                # Normalisation cluster score (1–5 → 0–1)
+                cluster_score_norm = (cluster_score - 1.0) / 4.0
+                # Sécurité
+                cluster_score_norm = max(0.0, min(cluster_score_norm, 1.0))
+                                # Score final
+                final_score = 0.3 * cluster_score_norm + 0.7 * content_score
                 recommendations.append({
                     'movie_id': movie['movie_id'],
                     'title': movie['title'],
@@ -514,7 +516,7 @@ class HybridRecommender:
                     'explanation': f'Populaire dans votre groupe démographique (score: {cluster_score:.2f})'
                 })
             
-            # Trie par score décroissant et retourne les 30 premiers
+            # Trier et limiter
             recommendations.sort(key=lambda x: x['score'], reverse=True)
             return recommendations[:top_n]
             
@@ -522,7 +524,9 @@ class HybridRecommender:
             print(f"❌ Erreur recommandations new-user: {e}")
             traceback.print_exc()
             return []
-    
+    def _normalize_rating(self, score):
+        return max(0.0, min(1.0, (score - 1.0) / 4.0))
+
     def recommend_for_existing_user(self, user_object_id, top_n=20):
         """Recommandations pour utilisateur existant"""
         try:
@@ -534,7 +538,7 @@ class HybridRecommender:
             if not user_id:
                 return self.recommend_for_new_user(user_object_id, top_n)
             
-            # Récupère les films qu'il a DÉJÀ évalués
+            # Récupérer les films évalués
             rated_movies = list(self.db.ratings.find(
                 {'user_id': user_id},
                 {'movie_id': 1}
@@ -544,7 +548,7 @@ class HybridRecommender:
             if not rated_movie_ids:
                 return self.recommend_for_new_user(user_object_id, top_n)
             
-            # Récupérer les films NON évalués
+            # Récupérer les films non évalués
             all_movies = list(self.db.movies.find({
                 'movie_id': {'$nin': rated_movie_ids}
             }, {
@@ -555,22 +559,24 @@ class HybridRecommender:
             recommendations = []
             for movie in all_movies:
                 scores = {
-                    'item_based': 0,     # Films similaires
-                    'user_based': 0,     # Utilisateurs similaires
-                    'content_based': 0,  # Préférences de genres
-                    'cluster': 0         # Popularité du cluster
+                    'item_based': 0,
+                    'user_based': 0,
+                    'content_based': 0,
+                    'cluster': 0
                 }
                 
-                # 1. Score Item-Based
-                scores['item_based'] = self._calculate_item_based_score(user_id, movie, rated_movie_ids)
-                
-                # 2. Score User-Based (Si les users similaires aiment ce film)
-                scores['user_based'] = self._calculate_user_based_score(user_id, movie)
-                
-                # 3. Score Content-Based (Si le film a des genres que l'user aime)
+                # 1. Item-Based (1–5 → 0–1)
+                scores['item_based'] = self._normalize_rating(
+                    self._calculate_item_based_score(user_id, movie, rated_movie_ids)
+                )
+
+                # 2. User-Based (1–5 → 0–1)
+                scores['user_based'] = self._normalize_rating(
+                    self._calculate_user_based_score(user_id, movie)
+                )
+                # 3. Content-Based (déjà normalisé)
                 scores['content_based'] = self._calculate_content_similarity(user, movie)
-                
-                # 4. Score Cluster (Popularité du film dans le cluster de l'user)
+                # 4. Cluster (1–5 → 0–1)
                 cluster_id = user.get('cluster_id')
                 cluster_score = movie.get('bayesian_rating', 3.0)
                 
@@ -581,8 +587,7 @@ class HybridRecommender:
                         if isinstance(cluster_data, dict):
                             cluster_score = cluster_data.get('score', cluster_score)
                 
-                scores['cluster'] = cluster_score
-                
+                scores['cluster'] = self._normalize_rating(cluster_score)
                 # Score final pondéré
                 # 35% item-based + 25% user-based + 25% content + 15% cluster
                 final_score = (
@@ -592,8 +597,8 @@ class HybridRecommender:
                     0.15 * scores['cluster']
                 )
                 
-                # Ne recommande que les films avec score > 2.0
-                if final_score > 2.0:  # Seuil plus bas pour plus de recommandations
+                # Ne recommande que les films avec score > 0.35 apres normalisation de final_score
+                if final_score > 0.35:  # Seuil plus bas pour plus de recommandations
                     recommendations.append({
                         'movie_id': movie['movie_id'],
                         'title': movie['title'],
@@ -653,12 +658,7 @@ class HybridRecommender:
         return numerator / denominator
     
     def _calculate_user_based_score(self, user_id, movie):
-        """Calculer le score user-based
-        Combien un utilisateur va aimer un film en regardant les utilisateurs similaires et leurs notes.
-        - On récupère les utilisateurs similaires à l’utilisateur cible.
-        - On récupère leurs notes pour le film en question.
-        - On fait une moyenne pondérée par la similarité entre utilisateurs.
-        """
+        """Calculer le score user-based"""
         # Récupérer les utilisateurs similaires
         user = self.db.users.find_one({'user_id': user_id})
         if not user:
@@ -723,16 +723,16 @@ class HybridRecommender:
         """Générer une explication"""
         explanations = []
         
-        if scores.get('item_based', 0) > 3.5:
+        if scores.get('item_based', 0) > 0.7:
             explanations.append("Similaire à vos films favoris")
         
-        if scores.get('user_based', 0) > 3.5:
+        if scores.get('user_based', 0) > 0.7:
             explanations.append("Aimé par des gens comme vous")
         
         if scores.get('content_based', 0) > 0.6:
             explanations.append("Correspond à vos goûts")
         
-        if scores.get('cluster', 0) > 3.5:
+        if scores.get('cluster', 0) > 0.7:
             explanations.append("Populaire dans votre groupe")
         
         return " | ".join(explanations) if explanations else "Recommandation personnalisée"
